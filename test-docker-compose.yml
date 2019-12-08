@@ -1,0 +1,57 @@
+version: '3.7'
+
+volumes:
+    prometheus_data: {}
+    grafana_data: {}
+
+networks:
+  front-tier:
+  back-tier:
+
+services:
+
+  traefik:
+    # The official v2.0.0-rc3 Traefik docker image
+    image: "traefik:v2.0.0-rc3"
+    container_name: "traefik"
+    volumes:
+      - "./prometheus/letsencrypt:/letsencrypt"     # Create a letsencrypt dir within the folder where the docker-compose file is
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+    networks:
+      - front-tier
+      - back-tier
+    command:
+      - "--api.insecure=true"                         # Enable the web UI. Enable the API in insecure mode, which means that the API will be available directly on the entryPoint named traefik. If the entryPoint named traefik is not configured, it will be automatically created on port 8080.
+      #- "--providers.docker=true"                    # Tell Traefik to listen to docker, in non-swarm mode
+      - "--providers.docker.swarmMode=true"           # Tell Traefik to listen to docker, in non-swarm mode
+      - "--providers.docker.exposedbydefault=false"   # Expose containers by default through Traefik. If set to false, containers that don't have a traefik.enable=true label will be ignored from the resulting routing configuration.
+      # - "--entrypoints.web.address=:80"                An 'Entrypoint' called 'web' is defined listening to port '80' which will receive the requests (whether HTTP or TCP). 
+      - "--entryPoints.web-secure.address=:443"       # An 'Entrypoint' called 'web-secure' is defined listening to port '443' which will receive the requests (whether HTTPS or TLS). 
+
+      - "--certificatesresolvers.mytlschallenge.acme.tlschallenge=true"        # Enable a tls challenge named "mytlschallenge"
+      #- "--certificatesresolvers.mytlschallenge.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory"
+      - "--certificatesresolvers.mytlschallenge.acme.email=postmaster@mydomain.com"     # Replace postmaster@mydomain.com by your own email
+      - "--certificatesresolvers.mytlschallenge.acme.storage=/letsencrypt/acme.json"    # Tell to store the certificate on a path under our volume
+    ports:
+      - target: 80
+        published: 80
+        mode: host
+#      - target: 443
+#        published: 443
+#        mode: host
+      - target: 8080
+        published: 8080
+        protocol: tcp
+        mode: ingress
+    deploy:
+#      replicas: 1
+      mode: global
+      placement:
+        constraints:
+          - node.role == manager
+      update_config:
+        parallelism: 1
+        delay: 10s
+      restart_policy:
+        condition: on-failure
+

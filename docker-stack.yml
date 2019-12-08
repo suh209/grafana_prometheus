@@ -1,0 +1,166 @@
+version: '3.7'
+
+networks:
+  monitor-net:
+    driver: overlay
+    name: inbound
+  traefik:
+    driver: overlay
+    name: traefik
+
+volumes:
+    prometheus_data: {}
+    grafana_data: {}
+
+services:
+
+  traefik:
+    # The official v2.0.0-rc3 Traefik docker image
+    image: "traefik:v2.0.0-rc3"
+#    container_name: "traefik"
+    volumes:
+      - "./prometheus/letsencrypt:/letsencrypt"     # Create a letsencrypt dir within the folder where the docker-compose file is
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+    networks:
+      - traefik
+      - monitor-net
+    command:
+      #- "--log.level=DEBUG"
+      - "--api.insecure=true"                         # Enable the web UI. Enable the API in insecure mode, which means that the API will be available directly on the entryPoint named traefik. If the entryPoint named traefik is not configured, it will be automatically created on port 8080.
+      - "--providers.docker=true"                    # Tell Traefik to listen to docker, in non-swarm mode
+      #- "--providers.docker.swarmMode=true"           # Tell Traefik to listen to docker, in non-swarm mode
+      - "--providers.docker.exposedbydefault=false"   # Expose containers by default through Traefik. If set to false, containers that don't have a traefik.enable=true label will be ignored from the resulting routing configuration.
+      # - "--entrypoints.web.address=:80"                An 'Entrypoint' called 'web' is defined listening to port '80' which will receive the requests (whether HTTP or TCP). 
+      - "--entryPoints.web-secure.address=:443"       # An 'Entrypoint' called 'web-secure' is defined listening to port '443' which will receive the requests (whether HTTPS or TLS). 
+
+      - "--certificatesresolvers.mytlschallenge.acme.tlschallenge=true"        # Enable a tls challenge named "mytlschallenge"
+      #- "--certificatesresolvers.mytlschallenge.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory"
+      - "--certificatesresolvers.mytlschallenge.acme.email=postmaster@mydomain.com"     # Replace postmaster@mydomain.com by your own email
+      - "--certificatesresolvers.mytlschallenge.acme.storage=/letsencrypt/acme.json"    # Tell to store the certificate on a path under our volume
+    ports:
+      - target: 80
+        published: 80
+        mode: host
+#      - target: 443
+#        published: 443
+#        mode: host
+      - target: 8080
+        published: 8080
+        protocol: tcp
+        mode: ingress
+    deploy:
+#      replicas: 1
+      mode: global
+      placement:
+        constraints:
+          - node.role == manager
+      update_config:
+        parallelism: 1
+        delay: 10s
+      restart_policy:
+        condition: on-failure
+
+  prometheus:
+    image: prom/prometheus
+    volumes:
+      - ./prometheus/:/etc/prometheus/
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - 9090:9090
+    depends_on:
+      - cadvisor
+    networks:
+      - monitor-net
+    deploy:
+      placement:
+        constraints:
+          - node.role==manager
+      restart_policy:
+        condition: on-failure
+
+  node-exporter:
+    image: prom/node-exporter
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command: 
+      - '--path.procfs=/host/proc' 
+      - '--path.sysfs=/host/sys'
+      - --collector.filesystem.ignored-mount-points
+      - "^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/docker/overlay2|rootfs/run/docker/netns|rootfs/var/lib/docker/aufs)($$|/)"
+    ports:
+      - 9100:9100
+    networks:
+      - monitor-net
+    deploy:
+      mode: global
+      restart_policy:
+          condition: on-failure
+
+  alertmanager:
+    image: prom/alertmanager
+    ports:
+      - 9093:9093
+    volumes:
+      - "./alertmanager/:/etc/alertmanager/"
+    networks:
+      - monitor-net
+    command:
+      - '--config.file=/etc/alertmanager/config.yml'
+      - '--storage.path=/alertmanager'
+    deploy:
+      placement:
+        constraints:
+           - node.role==manager
+      restart_policy:
+        condition: on-failure    
+
+  cadvisor:
+    image: google/cadvisor
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    ports:
+      - 8081:8080
+    networks:
+      - monitor-net
+    deploy:
+      mode: global
+      restart_policy:
+          condition: on-failure
+
+  grafana:
+    image: grafana/grafana
+    depends_on:
+      - prometheus
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning/:/etc/grafana/provisioning/
+    env_file:
+      - ./grafana/config.monitoring
+    networks:
+      - monitor-net
+    user: "104"
+    deploy:
+      placement:
+        constraints:
+          - node.role==manager
+      restart_policy:
+        condition: on-failure
+      labels:
+        - "traefik.enable=true"       # Explicitly tell Traefik to expose this container
+        #Forward requests for http://mydomain.com to http://<private IP of container>:8080. By default, Traefik uses the first exposed port of a container.
+        - "traefik.http.routers.grafana.rule=Host(`mydomain.com`)"     # Replace mydomain.com by your own domain
+        - "traefik.http.services.grafana.loadbalancer.server.port=8080"
+        #- "traefik.http.routers.grafana.entrypoints=web"       # Allow request only from the predefined entry point named "web"
+        - "traefik.http.routers.grafana.entrypoints=websecure"       # Allow request only from the predefined entry point named "web-secure"
+        - "traefik.http.routers.grafana.tls.certresolver=mytlschallenge"  # Uses the Host rule to define which certificate to issue
+
